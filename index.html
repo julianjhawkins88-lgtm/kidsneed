@@ -1,0 +1,2737 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#2d5016">
+    <title>KidsNeed - Spielend Lernen!</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script>
+      (function() {
+        const originalConsole = window.console;
+        window.console = {
+          log: (...args) => {
+            originalConsole.log(...args);
+            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
+          },
+          error: (...args) => {
+            originalConsole.error(...args);
+            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
+          },
+          warn: (...args) => {
+            originalConsole.warn(...args);
+            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
+          }
+        };
+
+        let requestId = 0;
+        let callbacksMap = new Map();
+        let streamControllers = new Map();
+        
+        window.claude = {
+          complete: (prompt) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
+            });
+          }
+        };
+
+        window.storage = {
+          get: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*');
+            });
+          },
+          set: (key, value, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
+            });
+          },
+          delete: (key, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
+            });
+          },
+          list: (prefix, shared = false) => {
+            return new Promise((resolve, reject) => {
+              const id = requestId++;
+              callbacksMap.set(id, { resolve, reject });
+              window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
+            });
+          }
+        };
+
+        let pendingBlobs = new Map();
+        URL.createObjectURL = (blob) => {
+          const blobId = `blob-${Date.now()}-${Math.random()}`;
+          pendingBlobs.set(blobId, blob);
+          return `blob-request://${blobId}`;
+        };
+
+        URL.revokeObjectURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          pendingBlobs.delete(blobId);
+        };
+
+        const getBlobFromURL = (url) => {
+          const blobId = url.replace("blob-request://", "");
+          return pendingBlobs.get(blobId);
+        };
+
+        window.fetch = (url, init = {}) => {
+          return new Promise((resolve, reject) => {
+            const id = requestId++;
+            const channelId = `fetch-${id}-${Date.now()}`;
+            
+            callbacksMap.set(id, { 
+              resolve: (response) => {
+                const stream = new ReadableStream({
+                  start(controller) {
+                    streamControllers.set(channelId, controller);
+                  },
+                  cancel() {
+                    streamControllers.delete(channelId);
+                  }
+                });
+                
+                resolve(new Response(stream, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers
+                }));
+              },
+              reject,
+              channelId
+            });
+            
+            window.parent.postMessage({
+              type: 'proxyFetch',
+              id,
+              url,
+              init,
+              channelId
+            }, '*');
+          });
+        };
+
+        window.addEventListener('message', async (event) => {
+          if (event.data.type === 'takeScreenshot') {
+            const rootElement = document.getElementById('artifacts-component-root-html');
+            if (!rootElement) {
+              window.parent.postMessage({
+                type: 'screenshotError',
+                error: new Error('Root element not found'),
+              }, '*');
+              return;
+            }
+            const screenshot = await htmlToImage.toPng(rootElement, {
+              imagePlaceholder:
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
+            });
+            window.parent.postMessage({
+              type: 'screenshotData',
+              data: screenshot,
+            }, '*');
+          } else if (event.data.type === 'claudeComplete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (!callback) return;
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.completion);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'proxyFetchResponse') {
+            const callback = callbacksMap.get(event.data.id);
+            if (!callback) return;
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+              callbacksMap.delete(event.data.id);
+            } else {
+              callback.resolve({
+                status: event.data.status,
+                statusText: event.data.statusText,
+                headers: event.data.headers
+              });
+              if (!event.data.body) {
+                callbacksMap.delete(event.data.id);
+              }
+            }
+          } else if (event.data.type === 'proxyFetchStream') {
+            const controller = streamControllers.get(event.data.channelId);
+            if (controller) {
+              if (event.data.error) {
+                controller.error(new Error(event.data.error));
+                streamControllers.delete(event.data.channelId);
+              } else if (event.data.done) {
+                controller.close();
+                streamControllers.delete(event.data.channelId);
+                const callback = Array.from(callbacksMap.entries()).find(
+                  ([_, value]) => value.channelId === event.data.channelId
+                );
+                if (callback) {
+                  callbacksMap.delete(callback[0]);
+                }
+              } else if (event.data.chunk) {
+                controller.enqueue(new Uint8Array(event.data.chunk));
+              }
+            }
+          } else if (event.data.type === 'storageGet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (!callback) return;
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageSet') {
+            const callback = callbacksMap.get(event.data.id);
+            if (!callback) return;
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageDelete') {
+            const callback = callbacksMap.get(event.data.id);
+            if (!callback) return;
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          } else if (event.data.type === 'storageList') {
+            const callback = callbacksMap.get(event.data.id);
+            if (!callback) return;
+            if (event.data.error) {
+              callback.reject(new Error(event.data.error));
+            } else {
+              callback.resolve(event.data.result);
+            }
+            callbacksMap.delete(event.data.id);
+          }
+        });
+      })();
+    </script>
+    <style>
+        /****************** CSS VARIABLES ******************/
+        :root {
+            --bg: #2d5016;
+            --bg-light: #3d6020;
+            --text: #e8f4dc;
+            --text-light: #c9e4a9;
+            --text-dim: #a8c485;
+            --primary: #ffd54f;
+            --primary-dark: #ffb300;
+            --secondary: #7cb342;
+            --success: #66bb6a;
+            --success-bright: #81c784;
+            --error: #ef5350;
+            --error-bright: #ff6b6b;
+            --chalk: #ffffff;
+            --shadow: rgba(0, 0, 0, 0.3);
+            --card-bg: rgba(61, 96, 32, 0.7);
+            --border-radius: 12px;
+            --border-radius-sm: 8px;
+            --spacing-xs: 6px;
+            --spacing-sm: 10px;
+            --spacing-md: 16px;
+            --spacing-lg: 24px;
+            --spacing-xl: 32px;
+        }
+
+        /****************** RESET & BASE ******************/
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        html {
+            font-size: 16px;
+            -webkit-text-size-adjust: 100%;
+            -ms-text-size-adjust: 100%;
+        }
+
+        body {
+            font-family: 'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', cursive;
+            background: linear-gradient(135deg, var(--bg) 0%, var(--bg-light) 100%);
+            color: var(--text);
+            min-height: 100vh;
+            min-height: -webkit-fill-available;
+            padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+            overflow-x: hidden;
+            touch-action: pan-y;
+        }
+
+        #artifacts-component-root-html {
+            min-height: 100vh;
+            min-height: -webkit-fill-available;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /****************** UTILITY CLASSES ******************/
+        .hidden {
+            display: none !important;
+        }
+
+        .text-center {
+            text-align: center;
+        }
+
+        .mt-sm { margin-top: var(--spacing-sm); }
+        .mt-md { margin-top: var(--spacing-md); }
+        .mt-lg { margin-top: var(--spacing-lg); }
+        .mb-sm { margin-bottom: var(--spacing-sm); }
+        .mb-md { margin-bottom: var(--spacing-md); }
+        .mb-lg { margin-bottom: var(--spacing-lg); }
+
+        /****************** HEADER ******************/
+        header {
+            text-align: center;
+            padding: var(--spacing-md) var(--spacing-sm);
+            background: var(--bg-light);
+            box-shadow: 0 3px 10px var(--shadow);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        h1 {
+            font-size: clamp(1.5rem, 5vw, 2.5rem);
+            color: var(--primary);
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            margin-bottom: var(--spacing-xs);
+            font-weight: 900;
+            letter-spacing: 1px;
+        }
+
+        .subtitle {
+            font-size: clamp(0.9rem, 3vw, 1.1rem);
+            color: var(--text-light);
+            font-weight: 600;
+        }
+
+        /****************** MAIN LAYOUT ******************/
+        main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: var(--spacing-md) var(--spacing-sm);
+            flex: 1;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: var(--border-radius);
+            padding: var(--spacing-md);
+            margin-bottom: var(--spacing-md);
+            box-shadow: 0 4px 15px var(--shadow);
+            backdrop-filter: blur(10px);
+        }
+
+        /****************** GAME MODE SELECTION ******************/
+        .mode-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: var(--spacing-sm);
+            margin-top: var(--spacing-md);
+        }
+
+        .mode-btn {
+            background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+            border: none;
+            border-radius: var(--border-radius);
+            padding: var(--spacing-md) var(--spacing-sm);
+            font-size: clamp(0.85rem, 2.5vw, 1rem);
+            font-weight: 800;
+            color: var(--bg);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            min-height: 80px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: var(--spacing-xs);
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .mode-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        .mode-btn:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        .mode-icon {
+            font-size: clamp(1.5rem, 4vw, 2rem);
+            display: block;
+        }
+
+        /****************** STATS ******************/
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: var(--spacing-sm);
+            margin-bottom: var(--spacing-md);
+        }
+
+        .stat-item {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: var(--border-radius-sm);
+            padding: var(--spacing-sm);
+            text-align: center;
+        }
+
+        .stat-label {
+            font-size: clamp(0.75rem, 2vw, 0.85rem);
+            color: var(--text-dim);
+            font-weight: 600;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: clamp(1.2rem, 4vw, 1.8rem);
+            font-weight: 900;
+            color: var(--text);
+            display: block;
+        }
+
+        /****************** GAME AREA ******************/
+        .game-area {
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: var(--border-radius);
+            padding: var(--spacing-md);
+            margin-bottom: var(--spacing-md);
+        }
+
+        .game-meta {
+            font-size: clamp(0.85rem, 2.5vw, 1rem);
+            color: var(--text-light);
+            margin-bottom: var(--spacing-sm);
+            font-weight: 600;
+        }
+
+        .game-prompt {
+            font-size: clamp(1.1rem, 3.5vw, 1.5rem);
+            font-weight: 800;
+            color: var(--chalk);
+            margin-bottom: var(--spacing-md);
+            line-height: 1.4;
+            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.3);
+            min-height: 60px;
+        }
+
+        /****************** CHOICES & BUTTONS ******************/
+        .choices {
+            display: grid;
+            gap: var(--spacing-sm);
+            margin-bottom: var(--spacing-md);
+        }
+
+        .choice-btn {
+            background: linear-gradient(135deg, #5a8c2e, var(--secondary));
+            border: 3px solid var(--text-light);
+            border-radius: var(--border-radius);
+            padding: var(--spacing-md) var(--spacing-sm);
+            font-size: clamp(1rem, 3vw, 1.3rem);
+            font-weight: 800;
+            color: var(--chalk);
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            min-height: 56px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            touch-action: manipulation;
+        }
+
+        .choice-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        .choice-btn:active {
+            transform: translateY(0);
+        }
+
+        .choice-btn.correct {
+            background: linear-gradient(135deg, #4caf50, var(--success-bright));
+            border-color: var(--success-bright);
+            animation: pulse 0.5s ease;
+        }
+
+        .choice-btn.wrong {
+            background: linear-gradient(135deg, #d32f2f, var(--error-bright));
+            border-color: var(--error-bright);
+            animation: shake 0.5s ease;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-10px); }
+            75% { transform: translateX(10px); }
+        }
+
+        /****************** CONTROL BUTTONS ******************/
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--spacing-sm);
+            justify-content: center;
+            margin-top: var(--spacing-md);
+        }
+
+        .btn {
+            background: linear-gradient(135deg, var(--primary-dark), var(--primary));
+            border: none;
+            border-radius: var(--border-radius);
+            padding: var(--spacing-sm) var(--spacing-md);
+            font-size: clamp(0.95rem, 2.5vw, 1.1rem);
+            font-weight: 800;
+            color: var(--bg);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            min-height: 48px;
+            min-width: 120px;
+            touch-action: manipulation;
+            flex: 0 1 auto;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .btn-secondary {
+            background: linear-gradient(135deg, #666, #888);
+        }
+
+        /****************** CANVAS STYLING ******************/
+        .canvas-container {
+            background: white;
+            border-radius: var(--border-radius);
+            padding: var(--spacing-sm);
+            margin: var(--spacing-md) auto;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            max-width: 100%;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            margin: 0 auto;
+            border: 2px solid #ddd;
+            border-radius: var(--border-radius-sm);
+            touch-action: none;
+            max-width: 100%;
+            height: auto;
+        }
+
+        /****************** INPUT FIELDS ******************/
+        .text-input {
+            width: 100%;
+            max-width: 500px;
+            padding: var(--spacing-md);
+            font-size: clamp(1.1rem, 3vw, 1.3rem);
+            font-weight: 700;
+            border: 3px solid var(--primary);
+            border-radius: var(--border-radius);
+            background: white;
+            color: var(--bg);
+            text-align: center;
+            margin: var(--spacing-md) auto;
+            display: block;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .text-input:focus {
+            outline: none;
+            border-color: var(--success);
+            box-shadow: 0 0 0 3px rgba(102, 187, 106, 0.3);
+        }
+
+        textarea.text-input {
+            min-height: 150px;
+            resize: vertical;
+            text-align: left;
+            font-family: 'Comic Sans MS', 'Chalkboard SE', cursive;
+        }
+
+        /****************** COLOR PICKER ******************/
+        .color-picker {
+            display: flex;
+            flex-wrap: wrap;
+            gap: var(--spacing-sm);
+            justify-content: center;
+            margin: var(--spacing-md) 0;
+        }
+
+        .color-btn {
+            width: 50px;
+            height: 50px;
+            border: 3px solid white;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            touch-action: manipulation;
+        }
+
+        .color-btn:hover {
+            transform: scale(1.1);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+        }
+
+        .color-btn.active {
+            border-width: 5px;
+            transform: scale(1.15);
+        }
+
+        /****************** MOTIVATION BANNER ******************/
+        .motivation-banner {
+            background: rgba(255, 213, 79, 0.2);
+            border: 3px solid var(--primary);
+            border-radius: var(--border-radius);
+            padding: var(--spacing-md);
+            margin: var(--spacing-md) 0;
+            font-size: clamp(1rem, 3vw, 1.2rem);
+            font-weight: 800;
+            text-align: center;
+            color: var(--primary);
+            min-height: 60px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /****************** PROGRESS BAR ******************/
+        .progress-container {
+            margin: var(--spacing-md) 0;
+        }
+
+        .progress-label {
+            font-size: clamp(0.9rem, 2.5vw, 1rem);
+            font-weight: 700;
+            color: var(--text-light);
+            margin-bottom: var(--spacing-xs);
+            text-align: center;
+        }
+
+        .progress-bar-bg {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 20px;
+            height: 20px;
+            overflow: hidden;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .progress-bar {
+            background: linear-gradient(90deg, var(--success), var(--success-bright));
+            height: 100%;
+            border-radius: 20px;
+            transition: width 0.5s ease;
+            min-width: 20px;
+        }
+
+        /****************** STREAK INDICATOR ******************/
+        .streak-container {
+            background: linear-gradient(135deg, #ff6b6b, #ff9a9a);
+            border-radius: var(--border-radius);
+            padding: var(--spacing-sm);
+            margin: var(--spacing-md) 0;
+            text-align: center;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            animation: glow 2s ease-in-out infinite;
+        }
+
+        @keyframes glow {
+            0%, 100% { box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+            50% { box-shadow: 0 6px 20px rgba(255, 107, 107, 0.6); }
+        }
+
+        .streak-text {
+            font-size: clamp(1.1rem, 3vw, 1.3rem);
+            font-weight: 900;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        /****************** CELEBRATION ******************/
+        .celebration {
+            font-size: clamp(3rem, 10vw, 5rem);
+            text-align: center;
+            margin: var(--spacing-md) 0;
+            animation: bounce 1s ease infinite;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-20px); }
+        }
+
+        /****************** MOBILE OPTIMIZATIONS ******************/
+        
+        /* Extra Small Mobile (320px - 480px) */
+        @media (max-width: 480px) {
+            :root {
+                --spacing-xs: 4px;
+                --spacing-sm: 8px;
+                --spacing-md: 12px;
+                --spacing-lg: 16px;
+                --spacing-xl: 20px;
+            }
+
+            header {
+                padding: var(--spacing-sm);
+            }
+
+            main {
+                padding: var(--spacing-sm);
+            }
+
+            .card {
+                padding: var(--spacing-sm);
+            }
+
+            .mode-grid {
+                grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                gap: var(--spacing-xs);
+            }
+
+            .mode-btn {
+                min-height: 70px;
+                padding: var(--spacing-sm) var(--spacing-xs);
+            }
+
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+                gap: var(--spacing-xs);
+            }
+
+            .choices {
+                grid-template-columns: 1fr;
+            }
+
+            .controls {
+                gap: var(--spacing-xs);
+            }
+
+            .btn {
+                min-width: 100px;
+                padding: var(--spacing-sm);
+            }
+
+            .color-btn {
+                width: 44px;
+                height: 44px;
+            }
+
+            .canvas-container {
+                padding: var(--spacing-xs);
+            }
+        }
+
+        /* Small Mobile Landscape & Small Tablet (481px - 768px) */
+        @media (min-width: 481px) and (max-width: 768px) {
+            .mode-grid {
+                grid-template-columns: repeat(3, 1fr);
+            }
+
+            .stats {
+                grid-template-columns: repeat(4, 1fr);
+            }
+
+            .choices {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        /* Tablet & Desktop (769px+) */
+        @media (min-width: 769px) {
+            .mode-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+
+            .stats {
+                grid-template-columns: repeat(4, 1fr);
+            }
+
+            .choices {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            main {
+                padding: var(--spacing-lg) var(--spacing-md);
+            }
+        }
+
+        /* Large Desktop (1200px+) */
+        @media (min-width: 1200px) {
+            .choices {
+                grid-template-columns: repeat(2, 1fr);
+                max-width: 800px;
+                margin-left: auto;
+                margin-right: auto;
+            }
+        }
+
+        /* Landscape Mode Optimizations */
+        @media (max-height: 600px) and (orientation: landscape) {
+            :root {
+                --spacing-xs: 3px;
+                --spacing-sm: 6px;
+                --spacing-md: 10px;
+                --spacing-lg: 14px;
+                --spacing-xl: 18px;
+            }
+
+            header {
+                padding: var(--spacing-xs) var(--spacing-sm);
+            }
+
+            h1 {
+                font-size: clamp(1.2rem, 4vw, 1.8rem);
+                margin-bottom: 2px;
+            }
+
+            .subtitle {
+                font-size: clamp(0.75rem, 2.5vw, 0.9rem);
+            }
+
+            main {
+                padding: var(--spacing-sm);
+            }
+
+            .card {
+                padding: var(--spacing-sm);
+                margin-bottom: var(--spacing-sm);
+            }
+
+            .stats {
+                grid-template-columns: repeat(4, 1fr);
+                gap: var(--spacing-xs);
+            }
+
+            .stat-item {
+                padding: var(--spacing-xs);
+            }
+
+            .game-area {
+                padding: var(--spacing-sm);
+                margin-bottom: var(--spacing-sm);
+            }
+
+            .game-prompt {
+                min-height: 40px;
+                margin-bottom: var(--spacing-sm);
+            }
+
+            .choices {
+                grid-template-columns: repeat(2, 1fr);
+                gap: var(--spacing-xs);
+                margin-bottom: var(--spacing-sm);
+            }
+
+            .choice-btn {
+                padding: var(--spacing-sm);
+                min-height: 44px;
+            }
+
+            .controls {
+                margin-top: var(--spacing-sm);
+                gap: var(--spacing-xs);
+            }
+
+            .btn {
+                padding: var(--spacing-xs) var(--spacing-sm);
+                min-height: 40px;
+                min-width: 100px;
+            }
+
+            .mode-grid {
+                grid-template-columns: repeat(4, 1fr);
+                gap: var(--spacing-xs);
+            }
+
+            .mode-btn {
+                min-height: 60px;
+                padding: var(--spacing-xs);
+            }
+
+            .motivation-banner {
+                padding: var(--spacing-sm);
+                min-height: 44px;
+            }
+
+            .canvas-container {
+                max-height: 250px;
+            }
+
+            canvas {
+                max-height: 230px;
+            }
+        }
+
+        /* Touch device optimizations */
+        @media (hover: none) and (pointer: coarse) {
+            .mode-btn,
+            .choice-btn,
+            .btn,
+            .color-btn {
+                min-height: 48px;
+            }
+
+            .mode-btn:hover,
+            .choice-btn:hover,
+            .btn:hover,
+            .color-btn:hover {
+                transform: none;
+            }
+        }
+
+        /* High DPI screens */
+        @media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+            canvas {
+                image-rendering: -webkit-optimize-contrast;
+                image-rendering: crisp-edges;
+            }
+        }
+
+        /* Dark mode support (optional) */
+        @media (prefers-color-scheme: dark) {
+            /* Already dark themed, no changes needed */
+        }
+
+        /* Reduced motion */
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
+
+        /****************** GRADE SELECTION ******************/
+        .grade-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: var(--spacing-md);
+            margin-top: var(--spacing-md);
+        }
+
+        .grade-btn {
+            background: linear-gradient(135deg, #4caf50, #66bb6a);
+            border: none;
+            border-radius: var(--border-radius);
+            padding: var(--spacing-lg) var(--spacing-md);
+            font-size: clamp(0.95rem, 2.5vw, 1.1rem);
+            font-weight: 800;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            min-height: 100px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: var(--spacing-xs);
+            touch-action: manipulation;
+        }
+
+        .grade-btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+        }
+
+        .grade-btn:active {
+            transform: translateY(0);
+        }
+
+        .grade-icon {
+            font-size: clamp(2rem, 5vw, 3rem);
+            display: block;
+        }
+
+        /* Mobile Grade Grid */
+        @media (max-width: 480px) {
+            .grade-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        /* Tablet & Desktop Grade Grid */
+        @media (min-width: 769px) {
+            .grade-grid {
+                grid-template-columns: repeat(4, 1fr);
+            }
+        }
+
+        /****************** PRINT STYLES ******************/
+        @media print {
+            header {
+                position: static;
+            }
+
+            .btn,
+            .controls,
+            .mode-grid {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="artifacts-component-root-html">
+        <header>
+            <h1>🎓 KidsNeed</h1>
+            <p class="subtitle">Spielend Lernen!</p>
+        </header>
+
+        <main>
+            <!-- Start Screen -->
+            <div id="startScreen">
+                <div class="card">
+                    <h2 class="text-center mb-md" style="color: var(--primary); font-size: clamp(1.3rem, 4vw, 1.8rem);">
+                        🌟 Wähle deine Übung! 🌟
+                    </h2>
+                    
+                    <div class="mode-grid">
+                        <button class="mode-btn" data-mode="spelling">
+                            <span class="mode-icon">📝</span>
+                            <span>Rechtschreibung</span>
+                        </button>
+                        <button class="mode-btn" data-mode="grammar">
+                            <span class="mode-icon">📖</span>
+                            <span>Grammatik</span>
+                        </button>
+                        <button class="mode-btn" data-mode="fillblanks">
+                            <span class="mode-icon">🧩</span>
+                            <span>Lückentext</span>
+                        </button>
+                        <button class="mode-btn" data-mode="wordtypes">
+                            <span class="mode-icon">🏷️</span>
+                            <span>Wortarten</span>
+                        </button>
+                        <button class="mode-btn" data-mode="sentences">
+                            <span class="mode-icon">🔄</span>
+                            <span>Satzbau</span>
+                        </button>
+                        <button class="mode-btn" data-mode="math">
+                            <span class="mode-icon">🔢</span>
+                            <span>Rechnen</span>
+                        </button>
+                        <button class="mode-btn" data-mode="sachkunde">
+                            <span class="mode-icon">🌍</span>
+                            <span>Sachkunde</span>
+                        </button>
+                        <button class="mode-btn" data-mode="physik">
+                            <span class="mode-icon">⚡</span>
+                            <span>Physik</span>
+                        </button>
+                        <button class="mode-btn" data-mode="writing">
+                            <span class="mode-icon">✍️</span>
+                            <span>Schreibatelier</span>
+                        </button>
+                        <button class="mode-btn" data-mode="tracing">
+                            <span class="mode-icon">✏️</span>
+                            <span>Nachspuren</span>
+                        </button>
+                        <button class="mode-btn" data-mode="painting">
+                            <span class="mode-icon">🎨</span>
+                            <span>Malen</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3 class="text-center mb-sm" style="color: var(--primary); font-size: clamp(1.1rem, 3vw, 1.3rem);">
+                        ⚙️ Einstellungen
+                    </h3>
+                    <div style="display: flex; flex-wrap: wrap; gap: var(--spacing-sm); justify-content: center; align-items: center;">
+                        <label style="display: flex; align-items: center; gap: 8px; font-size: clamp(0.9rem, 2.5vw, 1rem); font-weight: 700;">
+                            <input type="checkbox" id="soundToggle" checked style="width: 24px; height: 24px; cursor: pointer;">
+                            🔊 Sound
+                        </label>
+                        <label style="display: flex; align-items: center; gap: 8px; font-size: clamp(0.9rem, 2.5vw, 1rem); font-weight: 700;">
+                            Anzahl Aufgaben:
+                            <input type="number" id="questionCount" min="5" max="50" value="10" 
+                                   style="width: 70px; padding: 8px; font-size: 1rem; border-radius: 8px; border: 2px solid var(--primary); text-align: center; font-weight: 700;">
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Grade Selection Screen -->
+            <div id="gradeScreen" class="hidden">
+                <div class="card">
+                    <h2 class="text-center mb-md" style="color: var(--primary); font-size: clamp(1.3rem, 4vw, 1.8rem);">
+                        🎓 <span id="gradeModeName"></span> - Wähle deine Klasse
+                    </h2>
+                    
+                    <div class="grade-grid">
+                        <button class="grade-btn" data-grade="1">
+                            <span class="grade-icon">1️⃣</span>
+                            <span>Klasse 1</span>
+                        </button>
+                        <button class="grade-btn" data-grade="2">
+                            <span class="grade-icon">2️⃣</span>
+                            <span>Klasse 2</span>
+                        </button>
+                        <button class="grade-btn" data-grade="3">
+                            <span class="grade-icon">3️⃣</span>
+                            <span>Klasse 3</span>
+                        </button>
+                        <button class="grade-btn" data-grade="4">
+                            <span class="grade-icon">4️⃣</span>
+                            <span>Klasse 4</span>
+                        </button>
+                    </div>
+                    
+                    <div class="controls mt-lg">
+                        <button class="btn btn-secondary" id="backBtn">← Zurück</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Game Screen -->
+            <div id="gameScreen" class="hidden">
+                <!-- Stats -->
+                <div class="card">
+                    <div class="stats">
+                        <div class="stat-item">
+                            <span class="stat-label">✅ Richtig</span>
+                            <span class="stat-value" id="statCorrect">0</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">❌ Falsch</span>
+                            <span class="stat-value" id="statWrong">0</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">📊 Erfolg</span>
+                            <span class="stat-value" id="statPercent">0%</span>
+                        </div>
+                        <div class="stat-item">
+                            <span class="stat-label">⏱️ Zeit</span>
+                            <span class="stat-value" id="statTime">0:00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Streak -->
+                <div id="streakContainer" class="streak-container hidden">
+                    <div class="streak-text" id="streakText">🔥 Streak: 0</div>
+                </div>
+
+                <!-- Progress -->
+                <div class="progress-container">
+                    <div class="progress-label" id="progressLabel">Fortschritt: 0/10</div>
+                    <div class="progress-bar-bg">
+                        <div class="progress-bar" id="progressBar" style="width: 0%"></div>
+                    </div>
+                </div>
+
+                <!-- Game Area -->
+                <div class="card game-area">
+                    <div class="game-meta" id="gameMeta">Frage 1 von 10</div>
+                    <div class="game-prompt" id="gamePrompt">Lade Aufgabe...</div>
+                    <div id="gameChoices" class="choices"></div>
+                    <div id="gameExtra"></div>
+                </div>
+
+                <!-- Motivation -->
+                <div class="motivation-banner" id="motivationBanner">
+                    Viel Erfolg! Du schaffst das! 💪
+                </div>
+
+                <!-- Controls -->
+                <div class="controls">
+                    <button class="btn" id="speakBtn">🔊 Vorlesen</button>
+                    <button class="btn" id="nextBtn" style="display: none;">➡️ Weiter</button>
+                    <button class="btn btn-secondary" id="quitBtn">❌ Beenden</button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+    /*************** CONSTANTS ***************/
+    const GAME_MODES = {
+        spelling: { name: 'Rechtschreibung', icon: '📝' },
+        grammar: { name: 'Grammatik', icon: '📖' },
+        fillblanks: { name: 'Lückentext', icon: '🧩' },
+        wordtypes: { name: 'Wortarten', icon: '🏷️' },
+        sentences: { name: 'Satzbau', icon: '🔄' },
+        math: { name: 'Rechnen', icon: '🔢' },
+        sachkunde: { name: 'Sachkunde', icon: '🌍' },
+        physik: { name: 'Physik', icon: '⚡' },
+        writing: { name: 'Schreibatelier', icon: '✍️' },
+        tracing: { name: 'Nachspuren', icon: '✏️' },
+        painting: { name: 'Malen', icon: '🎨' }
+    };
+
+    const PEDAGOGY = {
+        FEEDBACK: {
+            correct: [
+                { emoji: '🌟', message: 'Super! Das war richtig!' },
+                { emoji: '⭐', message: 'Toll gemacht!' },
+                { emoji: '🎉', message: 'Sehr gut!' },
+                { emoji: '👏', message: 'Prima!' },
+                { emoji: '✨', message: 'Fantastisch!' },
+                { emoji: '🏆', message: 'Spitze!' },
+                { emoji: '💫', message: 'Ausgezeichnet!' },
+                { emoji: '🎊', message: 'Wunderbar!' }
+            ],
+            wrong: [
+                { emoji: '💪', message: 'Fast! Versuch es nochmal!' },
+                { emoji: '🤔', message: 'Nicht ganz, aber du lernst!' },
+                { emoji: '🌈', message: 'Aus Fehlern lernt man!' },
+                { emoji: '🌻', message: 'Probier es weiter!' },
+                { emoji: '🦋', message: 'Du schaffst das!' },
+                { emoji: '🌟', message: 'Beim nächsten Mal klappt es!' }
+            ]
+        },
+        MILESTONES: {
+            5: { emoji: '🎯', message: 'Wow! 5 Aufgaben geschafft!', audio: 'Fünf Aufgaben geschafft! Toll!' },
+            10: { emoji: '🏅', message: 'Super! Schon 10 Aufgaben!', audio: 'Zehn Aufgaben! Du bist spitze!' },
+            15: { emoji: '🌟', message: 'Wahnsinn! 15 Aufgaben!', audio: 'Fünfzehn Aufgaben! Fantastisch!' },
+            20: { emoji: '🏆', message: 'Unglaublich! 20 Aufgaben!', audio: 'Zwanzig Aufgaben! Du bist ein Champion!' }
+        }
+    };
+
+    const CONTENT = {
+        spelling: {
+            klasse1: [
+                { word: 'Oma', variants: ['Oma', 'Omer', 'Omar', 'Ohma'] },
+                { word: 'Uhr', variants: ['Uhr', 'Ur', 'Uur', 'Urh'] },
+                { word: 'Eis', variants: ['Eis', 'Eiss', 'Eiz', 'Aeis'] },
+                { word: 'Auto', variants: ['Auto', 'Auhto', 'Autoh', 'Aoto'] },
+                { word: 'Ball', variants: ['Ball', 'Bal', 'Bahl', 'Balll'] },
+                { word: 'Baum', variants: ['Baum', 'Bauhm', 'Boom', 'Baumm'] },
+                { word: 'Haus', variants: ['Haus', 'Hau', 'Hauss', 'Hause'] },
+                { word: 'Hund', variants: ['Hund', 'Hunt', 'Hunnt', 'Huhnd'] }
+            ],
+            klasse2: [
+                { word: 'Sonne', variants: ['Sonne', 'Sone', 'Sonnne', 'Sohne'] },
+                { word: 'Mond', variants: ['Mond', 'Mont', 'Mohnd', 'Mondt'] },
+                { word: 'Stern', variants: ['Stern', 'Schtern', 'Sterne', 'Sdtern'] },
+                { word: 'Blume', variants: ['Blume', 'Bluume', 'Bluhme', 'Blummee'] },
+                { word: 'Vogel', variants: ['Vogel', 'Fogel', 'Voggel', 'Vohgel'] },
+                { word: 'Schule', variants: ['Schule', 'Shule', 'Schuule', 'Schulle'] },
+                { word: 'Freund', variants: ['Freund', 'Froind', 'Freundt', 'Froynd'] },
+                { word: 'Familie', variants: ['Familie', 'Fammilie', 'Famillie', 'Famiehlie'] }
+            ],
+            klasse3: [
+                { word: 'Frühling', variants: ['Frühling', 'Fruehling', 'Früling', 'Frühlingg'] },
+                { word: 'Geburtstag', variants: ['Geburtstag', 'Geburtztag', 'Gebuhrtstag', 'Geburtstagg'] },
+                { word: 'Straße', variants: ['Straße', 'Strasse', 'Straßße', 'Strase'] },
+                { word: 'Brücke', variants: ['Brücke', 'Bruecke', 'Brüke', 'Brückke'] },
+                { word: 'Fenster', variants: ['Fenster', 'Fenstar', 'Fensster', 'Fensdter'] },
+                { word: 'Glocke', variants: ['Glocke', 'Glokke', 'Glocckee', 'Gloke'] },
+                { word: 'Schlüssel', variants: ['Schlüssel', 'Schluessel', 'Schlussel', 'Schlüßel'] },
+                { word: 'Packung', variants: ['Packung', 'Pakungg', 'Packungk', 'Pakkung'] }
+            ],
+            klasse4: [
+                { word: 'Rhythmus', variants: ['Rhythmus', 'Rythmus', 'Rhythhmus', 'Rytmus'] },
+                { word: 'Physik', variants: ['Physik', 'Physick', 'Fysik', 'Phisik'] },
+                { word: 'Computer', variants: ['Computer', 'Komputer', 'Compiuter', 'Computher'] },
+                { word: 'Bibliothek', variants: ['Bibliothek', 'Bibliotheck', 'Biblothek', 'Bibliothekk'] },
+                { word: 'Mathematik', variants: ['Mathematik', 'Matematik', 'Mathemathik', 'Matemahtik'] },
+                { word: 'Experiment', variants: ['Experiment', 'Experrimment', 'Experiement', 'Expriment'] },
+                { word: 'Restaurant', variants: ['Restaurant', 'Restorannt', 'Restaurrant', 'Restorant'] },
+                { word: 'Kilometer', variants: ['Kilometer', 'Killometer', 'Kilometter', 'Kilommeter'] }
+            ]
+        },
+        grammar: {
+            klasse1: {
+                articles: [
+                    { word: 'Hund', article: 'der', choices: ['der', 'die', 'das'] },
+                    { word: 'Katze', article: 'die', choices: ['der', 'die', 'das'] },
+                    { word: 'Auto', article: 'das', choices: ['der', 'die', 'das'] },
+                    { word: 'Baum', article: 'der', choices: ['der', 'die', 'das'] },
+                    { word: 'Sonne', article: 'die', choices: ['der', 'die', 'das'] }
+                ]
+            },
+            klasse2: {
+                articles: [
+                    { word: 'Schule', article: 'die', choices: ['der', 'die', 'das'] },
+                    { word: 'Buch', article: 'das', choices: ['der', 'die', 'das'] },
+                    { word: 'Lehrer', article: 'der', choices: ['der', 'die', 'das'] },
+                    { word: 'Tafel', article: 'die', choices: ['der', 'die', 'das'] }
+                ],
+                plurals: [
+                    { singular: 'Hund', plural: 'Hunde', choices: ['Hunde', 'Hunds', 'Hunden', 'Hünde'] },
+                    { singular: 'Katze', plural: 'Katzen', choices: ['Katzen', 'Katzes', 'Katzn', 'Kätzchen'] },
+                    { singular: 'Auto', plural: 'Autos', choices: ['Autos', 'Autoss', 'Autos', 'Auten'] }
+                ]
+            },
+            klasse3: {
+                articles: [
+                    { word: 'Frühling', article: 'der', choices: ['der', 'die', 'das'] },
+                    { word: 'Mädchen', article: 'das', choices: ['der', 'die', 'das'] },
+                    { word: 'Bibliothek', article: 'die', choices: ['der', 'die', 'das'] }
+                ],
+                plurals: [
+                    { singular: 'Kind', plural: 'Kinder', choices: ['Kinder', 'Kinds', 'Kindern', 'Kinde'] },
+                    { singular: 'Baum', plural: 'Bäume', choices: ['Bäume', 'Baums', 'Baumen', 'Baume'] },
+                    { singular: 'Buch', plural: 'Bücher', choices: ['Bücher', 'Buchs', 'Bucher', 'Büchern'] }
+                ]
+            },
+            klasse4: {
+                articles: [
+                    { word: 'Experiment', article: 'das', choices: ['der', 'die', 'das'] },
+                    { word: 'Rhythmus', article: 'der', choices: ['der', 'die', 'das'] },
+                    { word: 'Biologie', article: 'die', choices: ['der', 'die', 'das'] }
+                ],
+                plurals: [
+                    { singular: 'Haus', plural: 'Häuser', choices: ['Häuser', 'Hauser', 'Hausen', 'Haus'] },
+                    { singular: 'Maus', plural: 'Mäuse', choices: ['Mäuse', 'Mausen', 'Mauses', 'Mause'] },
+                    { singular: 'Datum', plural: 'Daten', choices: ['Daten', 'Datums', 'Datumen', 'Datümer'] }
+                ]
+            }
+        },
+        fillblanks: {
+            klasse1: [
+                { text: 'Die ___ scheint.', answer: 'Sonne', choices: ['Sonne', 'Mond', 'Stern', 'Wolke'] },
+                { text: 'Der ___ bellt.', answer: 'Hund', choices: ['Hund', 'Katze', 'Vogel', 'Fisch'] },
+                { text: 'Das ___ ist rot.', answer: 'Auto', choices: ['Auto', 'Haus', 'Ball', 'Buch'] },
+                { text: 'Ich trinke ___.', answer: 'Wasser', choices: ['Wasser', 'Milch', 'Saft', 'Tee'] }
+            ],
+            klasse2: [
+                { text: 'Ich gehe zur ___.', answer: 'Schule', choices: ['Schule', 'Arbeit', 'Stadt', 'Park'] },
+                { text: 'Die ___ blüht im Garten.', answer: 'Blume', choices: ['Blume', 'Baum', 'Gras', 'Hecke'] },
+                { text: 'Wir spielen im ___.', answer: 'Park', choices: ['Park', 'Haus', 'Laden', 'Kino'] },
+                { text: 'Der ___ ist blau.', answer: 'Himmel', choices: ['Himmel', 'Baum', 'See', 'Gras'] }
+            ],
+            klasse3: [
+                { text: 'Im ___ fallen die Blätter.', answer: 'Herbst', choices: ['Frühling', 'Sommer', 'Herbst', 'Winter'] },
+                { text: 'Der ___ schwimmt im Teich.', answer: 'Frosch', choices: ['Frosch', 'Vogel', 'Hase', 'Eichhörnchen'] },
+                { text: 'Ich lese ein ___ Buch.', answer: 'spannendes', choices: ['spannendes', 'spannend', 'spannende', 'spannender'] }
+            ],
+            klasse4: [
+                { text: 'Das ___ dauert zwei Stunden.', answer: 'Experiment', choices: ['Experiment', 'Spiel', 'Buch', 'Film'] },
+                { text: 'Die ___ liegt in Europa.', answer: 'Schweiz', choices: ['Schweiz', 'China', 'Brasilien', 'Australien'] },
+                { text: 'Er ___ gestern im Kino.', answer: 'war', choices: ['ist', 'war', 'wird', 'wurde'] }
+            ]
+        },
+        wordtypes: {
+            klasse1: [
+                { word: 'laufen', type: 'Verb', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'Hund', type: 'Nomen', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'schnell', type: 'Adjektiv', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'spielen', type: 'Verb', choices: ['Verb', 'Nomen', 'Adjektiv'] }
+            ],
+            klasse2: [
+                { word: 'Haus', type: 'Nomen', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'groß', type: 'Adjektiv', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'singen', type: 'Verb', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'Schule', type: 'Nomen', choices: ['Verb', 'Nomen', 'Adjektiv'] }
+            ],
+            klasse3: [
+                { word: 'fröhlich', type: 'Adjektiv', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'arbeiten', type: 'Verb', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'Freundschaft', type: 'Nomen', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'mutig', type: 'Adjektiv', choices: ['Verb', 'Nomen', 'Adjektiv'] }
+            ],
+            klasse4: [
+                { word: 'experimentieren', type: 'Verb', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'wissenschaftlich', type: 'Adjektiv', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'Forschung', type: 'Nomen', choices: ['Verb', 'Nomen', 'Adjektiv'] },
+                { word: 'analysieren', type: 'Verb', choices: ['Verb', 'Nomen', 'Adjektiv'] }
+            ]
+        },
+        sentences: {
+            klasse1: [
+                { correct: 'Ich bin klein.', scrambled: ['Ich', 'bin', 'klein', '.'] },
+                { correct: 'Der Hund bellt.', scrambled: ['Der', 'Hund', 'bellt', '.'] },
+                { correct: 'Die Sonne scheint.', scrambled: ['Die', 'Sonne', 'scheint', '.'] }
+            ],
+            klasse2: [
+                { correct: 'Ich gehe zur Schule.', scrambled: ['Ich', 'gehe', 'zur', 'Schule', '.'] },
+                { correct: 'Wir spielen im Park.', scrambled: ['Wir', 'spielen', 'im', 'Park', '.'] },
+                { correct: 'Das Auto fährt schnell.', scrambled: ['Das', 'Auto', 'fährt', 'schnell', '.'] }
+            ],
+            klasse3: [
+                { correct: 'Im Herbst fallen die Blätter.', scrambled: ['Im', 'Herbst', 'fallen', 'die', 'Blätter', '.'] },
+                { correct: 'Meine Freundin spielt gerne Fußball.', scrambled: ['Meine', 'Freundin', 'spielt', 'gerne', 'Fußball', '.'] }
+            ],
+            klasse4: [
+                { correct: 'Das wissenschaftliche Experiment war spannend.', scrambled: ['Das', 'wissenschaftliche', 'Experiment', 'war', 'spannend', '.'] },
+                { correct: 'Gestern haben wir im Museum interessante Dinge gelernt.', scrambled: ['Gestern', 'haben', 'wir', 'im', 'Museum', 'interessante', 'Dinge', 'gelernt', '.'] }
+            ]
+        },
+        math: {
+            klasse1: [
+                { question: '2 + 3', answer: 5, choices: [5, 4, 6, 3] },
+                { question: '5 - 2', answer: 3, choices: [3, 2, 4, 5] },
+                { question: '4 + 4', answer: 8, choices: [8, 7, 9, 6] },
+                { question: '7 - 3', answer: 4, choices: [4, 3, 5, 2] },
+                { question: '1 + 6', answer: 7, choices: [7, 6, 8, 5] }
+            ],
+            klasse2: [
+                { question: '12 + 7', answer: 19, choices: [19, 18, 20, 17] },
+                { question: '15 - 8', answer: 7, choices: [7, 6, 8, 9] },
+                { question: '3 × 2', answer: 6, choices: [6, 5, 7, 4] },
+                { question: '4 × 3', answer: 12, choices: [12, 11, 13, 10] },
+                { question: '10 ÷ 2', answer: 5, choices: [5, 4, 6, 3] }
+            ],
+            klasse3: [
+                { question: '45 + 38', answer: 83, choices: [83, 82, 84, 81] },
+                { question: '72 - 29', answer: 43, choices: [43, 42, 44, 41] },
+                { question: '7 × 8', answer: 56, choices: [56, 54, 58, 63] },
+                { question: '36 ÷ 6', answer: 6, choices: [6, 5, 7, 4] },
+                { question: '9 × 9', answer: 81, choices: [81, 72, 90, 79] }
+            ],
+            klasse4: [
+                { question: '234 + 567', answer: 801, choices: [801, 791, 811, 800] },
+                { question: '1000 - 347', answer: 653, choices: [653, 643, 663, 647] },
+                { question: '12 × 15', answer: 180, choices: [180, 170, 190, 160] },
+                { question: '144 ÷ 12', answer: 12, choices: [12, 11, 13, 14] },
+                { question: '25 × 8', answer: 200, choices: [200, 190, 210, 180] }
+            ]
+        },
+        writing: {
+            klasse1: [
+                { prompt: 'Male ein Bild und schreibe drei Wörter dazu.' },
+                { prompt: 'Was ist dein Lieblingstier? Schreibe zwei Sätze.' }
+            ],
+            klasse2: [
+                { prompt: 'Beschreibe deinen besten Freund. Was macht ihr gerne zusammen?' },
+                { prompt: 'Was hast du am Wochenende gemacht? Erzähle in 4-5 Sätzen.' }
+            ],
+            klasse3: [
+                { prompt: 'Erzähle von einem spannenden Erlebnis. Schreibe mindestens 6 Sätze.' },
+                { prompt: 'Was möchtest du später werden? Erkläre warum.' },
+                { prompt: 'Beschreibe deine Lieblingsjahreszeitund was du dann gerne machst.' }
+            ],
+            klasse4: [
+                { prompt: 'Schreibe eine Geschichte über eine Zeitreise. Wohin würdest du reisen und warum?' },
+                { prompt: 'Stell dir vor, du könntest eine Erfindung machen. Was würdest du erfinden?' },
+                { prompt: 'Schreibe einen Brief an dein zukünftiges Ich (in 10 Jahren).' }
+            ]
+        },
+        tracing: {
+            letters: ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'],
+            numbers: ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
+        },
+        painting: [
+            { prompt: 'Male ein Haus mit einem Garten' },
+            { prompt: 'Male deine Familie' },
+            { prompt: 'Male dein Lieblingstier' },
+            { prompt: 'Male einen Regenbogen' },
+            { prompt: 'Male was du willst!' }
+        ],
+        sachkunde: {
+            jahreszeiten: [
+                { question: 'Welche Jahreszeit kommt nach dem Frühling?', answer: 'Sommer', choices: ['Sommer', 'Herbst', 'Winter', 'Frühling'] },
+                { question: 'In welcher Jahreszeit fallen die Blätter von den Bäumen?', answer: 'Herbst', choices: ['Frühling', 'Sommer', 'Herbst', 'Winter'] },
+                { question: 'Wann ist es am kältesten?', answer: 'Winter', choices: ['Frühling', 'Sommer', 'Herbst', 'Winter'] },
+                { question: 'In welcher Jahreszeit blühen die meisten Blumen?', answer: 'Frühling', choices: ['Frühling', 'Sommer', 'Herbst', 'Winter'] }
+            ],
+            tiere: [
+                { question: 'Welches Tier kann fliegen?', answer: 'Vogel', choices: ['Vogel', 'Hund', 'Katze', 'Fisch'] },
+                { question: 'Welches Tier lebt im Wasser?', answer: 'Fisch', choices: ['Hund', 'Katze', 'Fisch', 'Hase'] },
+                { question: 'Welches Tier gibt uns Milch?', answer: 'Kuh', choices: ['Kuh', 'Huhn', 'Schwein', 'Schaf'] },
+                { question: 'Welches Tier legt Eier?', answer: 'Huhn', choices: ['Hund', 'Katze', 'Huhn', 'Kuh'] },
+                { question: 'Welches Tier hat einen Rüssel?', answer: 'Elefant', choices: ['Elefant', 'Giraffe', 'Löwe', 'Zebra'] },
+                { question: 'Welches Tier hat einen langen Hals?', answer: 'Giraffe', choices: ['Elefant', 'Giraffe', 'Löwe', 'Zebra'] }
+            ],
+            pflanzen: [
+                { question: 'Was brauchen Pflanzen zum Wachsen?', answer: 'Wasser und Licht', choices: ['Wasser und Licht', 'Nur Erde', 'Nur Luft', 'Nichts'] },
+                { question: 'Welcher Teil der Pflanze nimmt Wasser auf?', answer: 'Wurzel', choices: ['Blatt', 'Blüte', 'Wurzel', 'Stängel'] },
+                { question: 'Was macht die Blüte?', answer: 'Samen bilden', choices: ['Wasser aufnehmen', 'Samen bilden', 'Licht aufnehmen', 'Erde festhalten'] },
+                { question: 'Aus was wächst eine neue Pflanze?', answer: 'Samen', choices: ['Blatt', 'Samen', 'Blüte', 'Wurzel'] }
+            ],
+            koerper: [
+                { question: 'Mit welchem Organ sehen wir?', answer: 'Auge', choices: ['Auge', 'Ohr', 'Nase', 'Mund'] },
+                { question: 'Mit welchem Organ hören wir?', answer: 'Ohr', choices: ['Auge', 'Ohr', 'Nase', 'Mund'] },
+                { question: 'Mit welchem Organ riechen wir?', answer: 'Nase', choices: ['Auge', 'Ohr', 'Nase', 'Mund'] },
+                { question: 'Wie viele Finger hat eine Hand?', answer: '5', choices: ['4', '5', '6', '10'] },
+                { question: 'Was schlägt in unserer Brust?', answer: 'Herz', choices: ['Lunge', 'Herz', 'Magen', 'Leber'] }
+            ],
+            wetter: [
+                { question: 'Was fällt vom Himmel, wenn es regnet?', answer: 'Wasser', choices: ['Wasser', 'Schnee', 'Hagel', 'Sand'] },
+                { question: 'Was erscheint nach dem Regen am Himmel?', answer: 'Regenbogen', choices: ['Stern', 'Mond', 'Regenbogen', 'Sonne'] },
+                { question: 'Was fällt im Winter vom Himmel?', answer: 'Schnee', choices: ['Regen', 'Schnee', 'Sand', 'Blätter'] },
+                { question: 'Woher kommt der Wind?', answer: 'Bewegte Luft', choices: ['Von den Bergen', 'Bewegte Luft', 'Vom Meer', 'Von Bäumen'] }
+            ],
+            verkehr: [
+                { question: 'Bei welcher Ampelfarbe darfst du gehen?', answer: 'Grün', choices: ['Rot', 'Gelb', 'Grün', 'Blau'] },
+                { question: 'Bei welcher Ampelfarbe musst du stehen bleiben?', answer: 'Rot', choices: ['Rot', 'Gelb', 'Grün', 'Blau'] },
+                { question: 'Wo gehst du am sichersten über die Straße?', answer: 'Zebrastreifen', choices: ['Irgendwo', 'Zebrastreifen', 'Zwischen Autos', 'An der Kurve'] },
+                { question: 'Was trägst du auf dem Fahrrad zum Schutz?', answer: 'Helm', choices: ['Mütze', 'Helm', 'Hut', 'Nichts'] }
+            ]
+        },
+        physik: {
+            magnetismus: [
+                { question: 'Was zieht ein Magnet an?', answer: 'Eisen', choices: ['Holz', 'Plastik', 'Eisen', 'Papier'] },
+                { question: 'Zwei gleiche Magnetpole...', answer: 'stoßen sich ab', choices: ['ziehen sich an', 'stoßen sich ab', 'tun nichts', 'drehen sich'] },
+                { question: 'Was ist magnetisch?', answer: 'Eisennagel', choices: ['Holzstab', 'Plastikflasche', 'Eisennagel', 'Papier'] },
+                { question: 'Wo ist die Kraft eines Magneten am stärksten?', answer: 'An den Polen', choices: ['In der Mitte', 'An den Polen', 'Überall gleich', 'Nirgends'] }
+            ],
+            schwimmen: [
+                { question: 'Was schwimmt auf Wasser?', answer: 'Holz', choices: ['Stein', 'Metall', 'Holz', 'Sand'] },
+                { question: 'Was sinkt im Wasser?', answer: 'Stein', choices: ['Holz', 'Kork', 'Stein', 'Luftballon'] },
+                { question: 'Warum schwimmt ein Schiff?', answer: 'Es ist hohl', choices: ['Es ist klein', 'Es ist hohl', 'Es ist aus Holz', 'Es ist leicht'] },
+                { question: 'Was passiert mit einem leeren, geschlossenen Plastikbehälter im Wasser?', answer: 'Er schwimmt', choices: ['Er sinkt', 'Er schwimmt', 'Er löst sich auf', 'Er wird schwer'] }
+            ],
+            licht: [
+                { question: 'Was braucht man, um einen Schatten zu sehen?', answer: 'Licht', choices: ['Dunkelheit', 'Licht', 'Wasser', 'Wind'] },
+                { question: 'Wann ist dein Schatten am längsten?', answer: 'Morgens/Abends', choices: ['Mittags', 'Morgens/Abends', 'Nachts', 'Nie'] },
+                { question: 'Was lässt Licht durch?', answer: 'Glas', choices: ['Holz', 'Metall', 'Glas', 'Stein'] },
+                { question: 'Wie bewegt sich Licht?', answer: 'Geradeaus', choices: ['Im Kreis', 'Im Zickzack', 'Geradeaus', 'Nach oben'] }
+            ],
+            kraefte: [
+                { question: 'Was braucht man, um etwas zu bewegen?', answer: 'Kraft', choices: ['Licht', 'Wasser', 'Kraft', 'Wind'] },
+                { question: 'Was passiert, wenn du einen Ball wirfst?', answer: 'Er fliegt', choices: ['Er bleibt stehen', 'Er fliegt', 'Er verschwindet', 'Er wird größer'] },
+                { question: 'Warum fällt ein Ball nach unten?', answer: 'Schwerkraft', choices: ['Wind', 'Schwerkraft', 'Magnete', 'Luft'] },
+                { question: 'Was macht eine Rutsche?', answer: 'Bewegung leichter', choices: ['Bewegung schwerer', 'Bewegung leichter', 'Nichts', 'Ball stoppen'] }
+            ],
+            wasser: [
+                { question: 'Was passiert mit Wasser bei Kälte?', answer: 'Es gefriert', choices: ['Es verdampft', 'Es gefriert', 'Es wird warm', 'Nichts'] },
+                { question: 'Was passiert mit Eis in der Sonne?', answer: 'Es schmilzt', choices: ['Es wird härter', 'Es schmilzt', 'Es wird bunter', 'Nichts'] },
+                { question: 'Was passiert mit Wasser beim Kochen?', answer: 'Es verdampft', choices: ['Es gefriert', 'Es verdampft', 'Es wird fest', 'Nichts'] },
+                { question: 'Wie nennt man Wasserdampf in der Luft?', answer: 'Wolke', choices: ['Regen', 'Schnee', 'Wolke', 'Nebel'] }
+            ],
+            schall: [
+                { question: 'Wie entsteht Schall?', answer: 'Durch Schwingung', choices: ['Durch Licht', 'Durch Schwingung', 'Durch Wasser', 'Durch Wind'] },
+                { question: 'Womit hören wir Geräusche?', answer: 'Ohren', choices: ['Augen', 'Ohren', 'Nase', 'Mund'] },
+                { question: 'Was macht ein Echo?', answer: 'Schall prallt ab', choices: ['Schall verschwindet', 'Schall prallt ab', 'Schall wird lauter', 'Schall wird leiser'] },
+                { question: 'Wo ist es am lautesten?', answer: 'Nahe der Schallquelle', choices: ['Weit weg', 'Nahe der Schallquelle', 'Überall gleich', 'Im Wasser'] }
+            ]
+        }
+    };
+
+    /*************** UTILITIES ***************/
+    const Utils = {
+        shuffle(array) {
+            const arr = [...array];
+            for (let i = arr.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [arr[i], arr[j]] = [arr[j], arr[i]];
+            }
+            return arr;
+        },
+        
+        pick(array) {
+            return array[Math.floor(Math.random() * array.length)];
+        },
+        
+        formatTime(seconds) {
+            const mins = Math.floor(seconds / 60);
+            const secs = seconds % 60;
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        },
+        
+        playSound(type) {
+            // Could add Web Audio API sounds here
+        }
+    };
+
+    /*************** TEXT-TO-SPEECH ***************/
+    let speechEnabled = true;
+    
+    function speak(text) {
+        if (!speechEnabled || !('speechSynthesis' in window)) return;
+        
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'de-DE';
+        utterance.rate = 0.9;
+        utterance.pitch = 1.1;
+        window.speechSynthesis.speak(utterance);
+    }
+
+    function speakLetter(letter) {
+        const phonetics = {
+            'A': 'ah', 'B': 'beh', 'C': 'tseh', 'D': 'deh', 'E': 'eh',
+            'F': 'eff', 'G': 'geh', 'H': 'hah', 'I': 'ih', 'J': 'jot',
+            'K': 'kah', 'L': 'ell', 'M': 'emm', 'N': 'enn', 'O': 'oh',
+            'P': 'peh', 'Q': 'kuh', 'R': 'err', 'S': 'ess', 'T': 'teh',
+            'U': 'uh', 'V': 'fau', 'W': 'weh', 'X': 'iks', 'Y': 'üpsilon',
+            'Z': 'tsett'
+        };
+        speak(phonetics[letter] || letter);
+    }
+
+    /*************** GAME STATE ***************/
+    const GameState = {
+        mode: null,
+        grade: 1,
+        currentQuestion: 0,
+        totalQuestions: 10,
+        correct: 0,
+        wrong: 0,
+        streak: 0,
+        maxStreak: 0,
+        startTime: 0,
+        elapsed: 0,
+        timerInterval: null,
+        
+        init(mode, grade, total) {
+            this.mode = mode;
+            this.grade = grade;
+            this.totalQuestions = total;
+            this.currentQuestion = 0;
+            this.correct = 0;
+            this.wrong = 0;
+            this.streak = 0;
+            this.maxStreak = 0;
+            this.startTime = Date.now();
+            this.elapsed = 0;
+            
+            if (this.timerInterval) {
+                clearInterval(this.timerInterval);
+            }
+            this.timerInterval = setInterval(() => {
+                this.elapsed = Math.floor((Date.now() - this.startTime) / 1000);
+                UI.updateTimer();
+            }, 1000);
+        },
+        
+        answer(isCorrect) {
+            if (isCorrect) {
+                this.correct++;
+                this.streak++;
+                if (this.streak > this.maxStreak) {
+                    this.maxStreak = this.streak;
+                }
+            } else {
+                this.wrong++;
+                this.streak = 0;
+            }
+            this.currentQuestion++;
+        },
+        
+        getStats() {
+            const total = this.correct + this.wrong;
+            const percent = total > 0 ? Math.round((this.correct / total) * 100) : 0;
+            return {
+                correct: this.correct,
+                wrong: this.wrong,
+                total,
+                percent,
+                streak: this.streak,
+                maxStreak: this.maxStreak,
+                elapsed: this.elapsed
+            };
+        }
+    };
+
+    /*************** UI CONTROLLER ***************/
+    const UI = {
+        els: {},
+        
+        init() {
+            this.els = {
+                startScreen: document.getElementById('startScreen'),
+                gradeScreen: document.getElementById('gradeScreen'),
+                gameScreen: document.getElementById('gameScreen'),
+                modeButtons: document.querySelectorAll('.mode-btn'),
+                gradeButtons: document.querySelectorAll('.grade-btn'),
+                backBtn: document.getElementById('backBtn'),
+                soundToggle: document.getElementById('soundToggle'),
+                questionCount: document.getElementById('questionCount'),
+                gameMeta: document.getElementById('gameMeta'),
+                prompt: document.getElementById('gamePrompt'),
+                choices: document.getElementById('gameChoices'),
+                extra: document.getElementById('gameExtra'),
+                speakBtn: document.getElementById('speakBtn'),
+                nextBtn: document.getElementById('nextBtn'),
+                quitBtn: document.getElementById('quitBtn'),
+                motivationBanner: document.getElementById('motivationBanner'),
+                progressLabel: document.getElementById('progressLabel'),
+                progressBar: document.getElementById('progressBar'),
+                statCorrect: document.getElementById('statCorrect'),
+                statWrong: document.getElementById('statWrong'),
+                statPercent: document.getElementById('statPercent'),
+                statTime: document.getElementById('statTime'),
+                streakContainer: document.getElementById('streakContainer'),
+                streakText: document.getElementById('streakText')
+            };
+            
+            this.selectedMode = null;
+            this.attachEventListeners();
+        },
+        
+        attachEventListeners() {
+            this.els.modeButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const mode = btn.dataset.mode;
+                    
+                    // Prüfe ob Modus Klassenstufen braucht
+                    if (mode === 'tracing' || mode === 'painting') {
+                        // Keine Klassenstufen - direkt starten
+                        this.startGame(mode, 1);
+                    } else {
+                        // Zeige Klassenauswahl
+                        this.showGradeSelection(mode);
+                    }
+                });
+            });
+            
+            // Grade-Buttons
+            this.els.gradeButtons.forEach(btn => {
+                btn.addEventListener('click', () => {
+                    const grade = parseInt(btn.dataset.grade);
+                    this.startGameWithGrade(grade);
+                });
+            });
+            
+            // Back-Button
+            this.els.backBtn.addEventListener('click', () => {
+                this.hideCard(this.els.gradeScreen);
+                this.showCard(this.els.startScreen);
+            });
+            
+            this.els.soundToggle.addEventListener('change', (e) => {
+                speechEnabled = e.target.checked;
+            });
+            
+            this.els.speakBtn.addEventListener('click', () => {
+                const text = this.els.prompt.textContent;
+                speak(text);
+            });
+            
+            this.els.nextBtn.addEventListener('click', () => {
+                this.nextQuestion();
+            });
+            
+            this.els.quitBtn.addEventListener('click', () => {
+                if (confirm('Möchtest du wirklich aufhören?')) {
+                    this.showStartScreen();
+                }
+            });
+        },
+        
+        showGradeSelection(mode) {
+            this.selectedMode = mode;
+            const modeName = GAME_MODES[mode].name;
+            
+            document.getElementById('gradeModeName').textContent = modeName;
+            
+            this.hideCard(this.els.startScreen);
+            this.showCard(this.els.gradeScreen);
+        },
+        
+        startGameWithGrade(grade) {
+            const mode = this.selectedMode;
+            const total = parseInt(this.els.questionCount.value) || 10;
+            
+            GameState.init(mode, grade, total);
+            
+            this.hideCard(this.els.gradeScreen);
+            this.showCard(this.els.gameScreen);
+            
+            this.els.motivationBanner.textContent = 'Viel Erfolg! Du schaffst das! 💪';
+            this.updateStats();
+            this.updateTimer();
+            this.nextQuestion();
+            
+            speak('Los geht\'s! Viel Erfolg!');
+        },
+        
+        startGame(mode, grade) {
+            const total = parseInt(this.els.questionCount.value) || 10;
+            GameState.init(mode, grade, total);
+            
+            this.hideCard(this.els.startScreen);
+            this.showCard(this.els.gameScreen);
+            
+            this.els.motivationBanner.textContent = 'Viel Erfolg! Du schaffst das! 💪';
+            this.updateStats();
+            this.updateTimer();
+            this.nextQuestion();
+            
+            speak('Los geht\'s! Viel Erfolg!');
+        },
+        
+        showStartScreen() {
+            // Verstecke Game-Screen und Grade-Screen, zeige Start-Screen
+            this.hideCard(this.els.gameScreen);
+            this.hideCard(this.els.gradeScreen);
+            this.showCard(this.els.startScreen);
+            
+            // Stoppe Timer
+            if (GameState.timerInterval) {
+                clearInterval(GameState.timerInterval);
+                GameState.timerInterval = null;
+            }
+            
+            // Setze GameState zurück
+            GameState.mode = null;
+            GameState.grade = 1;
+            GameState.currentQuestion = 0;
+            GameState.correct = 0;
+            GameState.wrong = 0;
+            GameState.streak = 0;
+            GameState.maxStreak = 0;
+            GameState.elapsed = 0;
+            
+            // Leere Spielbereiche
+            this.els.prompt.textContent = '';
+            this.els.choices.innerHTML = '';
+            this.els.extra.innerHTML = '';
+            this.els.motivationBanner.textContent = '';
+            
+            // Aktiviere Speak-Button wieder
+            this.els.speakBtn.disabled = false;
+            
+            // Verstecke Next-Button
+            this.els.nextBtn.style.display = 'none';
+            
+            // Verstecke Streak
+            this.hideCard(this.els.streakContainer);
+            
+            // Setze Progress zurück
+            this.els.progressBar.style.width = '0%';
+            this.els.progressLabel.textContent = 'Fortschritt: 0/10';
+            
+            // Setze Stats zurück
+            this.els.statCorrect.textContent = '0';
+            this.els.statWrong.textContent = '0';
+            this.els.statPercent.textContent = '0%';
+            this.els.statTime.textContent = '0:00';
+        },
+        
+        nextQuestion() {
+            this.els.nextBtn.style.display = 'none';
+            this.els.speakBtn.disabled = false;
+            this.els.motivationBanner.textContent = '';
+            this.els.choices.innerHTML = '';
+            this.els.extra.innerHTML = '';
+            
+            if (GameState.currentQuestion >= GameState.totalQuestions) {
+                this.renderFinished();
+                return;
+            }
+            
+            this.updateProgress();
+            
+            const mode = GameState.mode;
+            if (mode === 'spelling') this.renderSpelling();
+            else if (mode === 'grammar') this.renderGrammar();
+            else if (mode === 'fillblanks') this.renderFillBlanks();
+            else if (mode === 'wordtypes') this.renderWordTypes();
+            else if (mode === 'sentences') this.renderSentences();
+            else if (mode === 'math') this.renderMath();
+            else if (mode === 'sachkunde') this.renderSachkunde();
+            else if (mode === 'physik') this.renderPhysik();
+            else if (mode === 'writing') this.renderWriting();
+            else if (mode === 'tracing') this.renderTracing();
+            else if (mode === 'painting') this.renderPainting();
+            
+            if (GameState.streak >= 3) {
+                this.els.streakText.textContent = `🔥 Streak: ${GameState.streak}`;
+                this.showCard(this.els.streakContainer);
+            } else {
+                this.hideCard(this.els.streakContainer);
+            }
+        },
+        
+        updateProgress() {
+            const current = GameState.currentQuestion + 1;
+            const total = GameState.totalQuestions;
+            const percent = Math.round((current / total) * 100);
+            
+            this.els.gameMeta.textContent = `Frage ${current} von ${total}`;
+            this.els.progressLabel.textContent = `Fortschritt: ${current}/${total}`;
+            this.els.progressBar.style.width = `${percent}%`;
+        },
+        
+        handleAnswer(isCorrect, userAnswer, correctAnswer) {
+            this.els.speakBtn.disabled = true;
+            
+            const feedback = Utils.pick(isCorrect ? PEDAGOGY.FEEDBACK.correct : PEDAGOGY.FEEDBACK.wrong);
+            this.els.motivationBanner.textContent = `${feedback.emoji} ${feedback.message}`;
+            speak(feedback.message);
+            
+            if (isCorrect) {
+                Utils.playSound('correct');
+            } else {
+                Utils.playSound('wrong');
+                if (correctAnswer) {
+                    setTimeout(() => {
+                        speak(`Die richtige Antwort war: ${correctAnswer}`);
+                    }, 1500);
+                }
+            }
+            
+            GameState.answer(isCorrect);
+            
+            setTimeout(() => {
+                this.els.nextBtn.style.display = 'inline-block';
+                this.els.nextBtn.focus();
+            }, 1000);
+            
+            const answered = GameState.correct + GameState.wrong;
+            if (PEDAGOGY.MILESTONES[answered]) {
+                const milestone = PEDAGOGY.MILESTONES[answered];
+                this.els.motivationBanner.textContent = `${milestone.emoji} ${milestone.message}`;
+                speak(milestone.audio || milestone.message);
+            }
+            
+            this.updateStats();
+        },
+        
+        renderSpelling() {
+            const gradeKey = `klasse${GameState.grade}`;
+            const words = CONTENT.spelling[gradeKey];
+            const item = Utils.pick(words);
+            
+            this.els.gameMeta.textContent = `📝 Rechtschreibung - Klasse ${GameState.grade}`;
+            this.els.prompt.textContent = `Wie schreibt man "${item.word}" richtig?`;
+            speak(`Wie schreibt man ${item.word} richtig?`);
+            
+            const shuffled = Utils.shuffle(item.variants);
+            shuffled.forEach(variant => {
+                const btn = document.createElement('button');
+                btn.className = 'choice-btn';
+                btn.textContent = variant;
+                btn.onclick = () => {
+                    const correct = variant === item.word;
+                    btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                    
+                    Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                    
+                    this.handleAnswer(correct, variant, item.word);
+                };
+                this.els.choices.appendChild(btn);
+            });
+        },
+        
+        renderGrammar() {
+            const gradeKey = `klasse${GameState.grade}`;
+            const gradeContent = CONTENT.grammar[gradeKey];
+            
+            // Klasse 1 hat nur articles, ab Klasse 2 auch plurals
+            let mode = 'articles';
+            if (GameState.grade >= 2 && gradeContent.plurals) {
+                mode = Math.random() > 0.5 ? 'articles' : 'plurals';
+            }
+            
+            if (mode === 'articles') {
+                const item = Utils.pick(gradeContent.articles);
+                this.els.gameMeta.textContent = `📖 Grammatik - Artikel (Klasse ${GameState.grade})`;
+                this.els.prompt.textContent = `Welcher Artikel passt zu "${item.word}"?`;
+                speak(`Welcher Artikel passt zu ${item.word}?`);
+                
+                item.choices.forEach(choice => {
+                    const btn = document.createElement('button');
+                    btn.className = 'choice-btn';
+                    btn.textContent = choice;
+                    btn.onclick = () => {
+                        const correct = choice === item.article;
+                        btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                        Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                        this.handleAnswer(correct, choice, item.article);
+                    };
+                    this.els.choices.appendChild(btn);
+                });
+            } else {
+                const item = Utils.pick(gradeContent.plurals);
+                this.els.gameMeta.textContent = `📖 Grammatik - Mehrzahl (Klasse ${GameState.grade})`;
+                this.els.prompt.textContent = `Wie heißt die Mehrzahl von "${item.singular}"?`;
+                speak(`Wie heißt die Mehrzahl von ${item.singular}?`);
+                
+                const shuffled = Utils.shuffle(item.choices);
+                shuffled.forEach(choice => {
+                    const btn = document.createElement('button');
+                    btn.className = 'choice-btn';
+                    btn.textContent = choice;
+                    btn.onclick = () => {
+                        const correct = choice === item.plural;
+                        btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                        Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                        this.handleAnswer(correct, choice, item.plural);
+                    };
+                    this.els.choices.appendChild(btn);
+                });
+            }
+        },
+        
+        renderFillBlanks() {
+            const gradeKey = `klasse${GameState.grade}`;
+            const items = CONTENT.fillblanks[gradeKey];
+            const item = Utils.pick(items);
+            
+            this.els.gameMeta.textContent = `🧩 Lückentext - Klasse ${GameState.grade}`;
+            this.els.prompt.textContent = item.text;
+            speak(item.text.replace('___', 'Lücke'));
+            
+            const shuffled = Utils.shuffle(item.choices);
+            shuffled.forEach(choice => {
+                const btn = document.createElement('button');
+                btn.className = 'choice-btn';
+                btn.textContent = choice;
+                btn.onclick = () => {
+                    const correct = choice === item.answer;
+                    btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                    Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                    this.handleAnswer(correct, choice, item.answer);
+                };
+                this.els.choices.appendChild(btn);
+            });
+        },
+        
+        renderWordTypes() {
+            const gradeKey = `klasse${GameState.grade}`;
+            const items = CONTENT.wordtypes[gradeKey];
+            const item = Utils.pick(items);
+            
+            this.els.gameMeta.textContent = `🏷️ Wortarten - Klasse ${GameState.grade}`;
+            this.els.prompt.textContent = `Was ist "${item.word}" für eine Wortart?`;
+            speak(`Was ist ${item.word} für eine Wortart?`);
+            
+            const shuffled = Utils.shuffle(item.choices);
+            shuffled.forEach(choice => {
+                const btn = document.createElement('button');
+                btn.className = 'choice-btn';
+                btn.textContent = choice;
+                btn.onclick = () => {
+                    const correct = choice === item.type;
+                    btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                    Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                    this.handleAnswer(correct, choice, item.type);
+                };
+                this.els.choices.appendChild(btn);
+            });
+        },
+        
+        renderSentences() {
+            const gradeKey = `klasse${GameState.grade}`;
+            const items = CONTENT.sentences[gradeKey];
+            const item = Utils.pick(items);
+            const scrambled = Utils.shuffle(item.scrambled);
+            let userSentence = [];
+            
+            this.els.gameMeta.textContent = `🔄 Satzbau - Klasse ${GameState.grade}`;
+            this.els.prompt.textContent = 'Ordne die Wörter in die richtige Reihenfolge:';
+            speak('Ordne die Wörter in die richtige Reihenfolge');
+            
+            const wordBank = document.createElement('div');
+            wordBank.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 16px 0;';
+            
+            const sentenceDisplay = document.createElement('div');
+            sentenceDisplay.style.cssText = 'min-height: 60px; background: rgba(255,255,255,0.1); border-radius: 8px; padding: 12px; margin: 16px 0; font-size: 1.2rem; font-weight: 700; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: center;';
+            
+            const checkBtn = document.createElement('button');
+            checkBtn.className = 'btn';
+            checkBtn.textContent = '✓ Prüfen';
+            checkBtn.onclick = () => {
+                const userAnswer = userSentence.join(' ');
+                const correct = userAnswer === item.correct;
+                this.handleAnswer(correct, userAnswer, item.correct);
+            };
+            
+            scrambled.forEach(word => {
+                const btn = document.createElement('button');
+                btn.className = 'btn';
+                btn.textContent = word;
+                btn.style.cssText = 'min-width: auto; padding: 8px 16px;';
+                btn.onclick = () => {
+                    userSentence.push(word);
+                    btn.disabled = true;
+                    updateDisplay();
+                };
+                wordBank.appendChild(btn);
+            });
+            
+            const updateDisplay = () => {
+                sentenceDisplay.textContent = userSentence.join(' ');
+            };
+            
+            const clearBtn = document.createElement('button');
+            clearBtn.className = 'btn btn-secondary';
+            clearBtn.textContent = '↺ Zurücksetzen';
+            clearBtn.onclick = () => {
+                userSentence = [];
+                Array.from(wordBank.children).forEach(btn => btn.disabled = false);
+                updateDisplay();
+            };
+            
+            this.els.extra.appendChild(wordBank);
+            this.els.extra.appendChild(sentenceDisplay);
+            
+            const controls = document.createElement('div');
+            controls.style.cssText = 'display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap;';
+            controls.appendChild(checkBtn);
+            controls.appendChild(clearBtn);
+            this.els.extra.appendChild(controls);
+        },
+        
+        renderMath() {
+            const gradeKey = `klasse${GameState.grade}`;
+            const problems = CONTENT.math[gradeKey];
+            const item = Utils.pick(problems);
+            
+            this.els.gameMeta.textContent = `🔢 Rechnen - Klasse ${GameState.grade}`;
+            this.els.prompt.textContent = `${item.question} = ?`;
+            speak(`Was ist ${item.question}?`);
+            
+            const shuffled = Utils.shuffle(item.choices);
+            shuffled.forEach(choice => {
+                const btn = document.createElement('button');
+                btn.className = 'choice-btn';
+                btn.textContent = choice;
+                btn.onclick = () => {
+                    const correct = choice === item.answer;
+                    btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                    Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                    this.handleAnswer(correct, choice, item.answer);
+                };
+                this.els.choices.appendChild(btn);
+            });
+        },
+        
+        renderSachkunde() {
+            // Generator: Wähle zufällig ein Themengebiet
+            const topics = ['jahreszeiten', 'tiere', 'pflanzen', 'koerper', 'wetter', 'verkehr'];
+            const topic = Utils.pick(topics);
+            const items = CONTENT.sachkunde[topic];
+            const item = Utils.pick(items);
+            
+            const topicNames = {
+                'jahreszeiten': 'Jahreszeiten',
+                'tiere': 'Tiere',
+                'pflanzen': 'Pflanzen',
+                'koerper': 'Körper',
+                'wetter': 'Wetter',
+                'verkehr': 'Verkehr'
+            };
+            
+            this.els.gameMeta.textContent = `🌍 Sachkunde - ${topicNames[topic]} (Klasse ${GameState.grade})`;
+            this.els.prompt.textContent = item.question;
+            speak(item.question);
+            
+            const shuffled = Utils.shuffle(item.choices);
+            shuffled.forEach(choice => {
+                const btn = document.createElement('button');
+                btn.className = 'choice-btn';
+                btn.textContent = choice;
+                btn.onclick = () => {
+                    const correct = choice === item.answer;
+                    btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                    Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                    this.handleAnswer(correct, choice, item.answer);
+                };
+                this.els.choices.appendChild(btn);
+            });
+        },
+        
+        renderPhysik() {
+            // Generator: Wähle zufällig ein Themengebiet
+            const topics = ['magnetismus', 'schwimmen', 'licht', 'kraefte', 'wasser', 'schall'];
+            const topic = Utils.pick(topics);
+            const items = CONTENT.physik[topic];
+            const item = Utils.pick(items);
+            
+            const topicNames = {
+                'magnetismus': 'Magnetismus',
+                'schwimmen': 'Schwimmen & Sinken',
+                'licht': 'Licht & Schatten',
+                'kraefte': 'Kräfte',
+                'wasser': 'Wasser',
+                'schall': 'Schall'
+            };
+            
+            const topicEmojis = {
+                'magnetismus': '🧲',
+                'schwimmen': '🌊',
+                'licht': '💡',
+                'kraefte': '💪',
+                'wasser': '💧',
+                'schall': '🔊'
+            };
+            
+            this.els.gameMeta.textContent = `⚡ Physik - ${topicNames[topic]} (Klasse ${GameState.grade})`;
+            this.els.prompt.textContent = `${topicEmojis[topic]} ${item.question}`;
+            speak(item.question);
+            
+            const shuffled = Utils.shuffle(item.choices);
+            shuffled.forEach(choice => {
+                const btn = document.createElement('button');
+                btn.className = 'choice-btn';
+                btn.textContent = choice;
+                btn.onclick = () => {
+                    const correct = choice === item.answer;
+                    btn.className = correct ? 'choice-btn correct' : 'choice-btn wrong';
+                    Array.from(this.els.choices.children).forEach(b => b.disabled = true);
+                    this.handleAnswer(correct, choice, item.answer);
+                };
+                this.els.choices.appendChild(btn);
+            });
+        },
+        
+        renderWriting() {
+            const gradeKey = `klasse${GameState.grade}`;
+            const prompts = CONTENT.writing[gradeKey];
+            const item = Utils.pick(prompts);
+            
+            this.els.gameMeta.textContent = `✍️ Schreibatelier - Klasse ${GameState.grade}`;
+            this.els.prompt.textContent = item.prompt;
+            speak(item.prompt);
+            
+            const textarea = document.createElement('textarea');
+            textarea.className = 'text-input';
+            textarea.placeholder = 'Schreibe hier deine Geschichte...';
+            textarea.rows = 6;
+            
+            const finishBtn = document.createElement('button');
+            finishBtn.className = 'btn';
+            finishBtn.textContent = '✓ Fertig';
+            finishBtn.onclick = () => {
+                if (textarea.value.trim().length < 10) {
+                    speak('Schreib noch ein bisschen mehr!');
+                    return;
+                }
+                
+                const feedback = Utils.pick(PEDAGOGY.FEEDBACK.correct);
+                this.els.motivationBanner.textContent = `${feedback.emoji} ${feedback.message}`;
+                speak(feedback.message);
+                Utils.playSound('correct');
+                GameState.answer(true);
+                
+                setTimeout(() => {
+                    this.els.nextBtn.style.display = 'inline-block';
+                    this.els.nextBtn.focus();
+                }, 1000);
+                
+                const answered = GameState.correct + GameState.wrong;
+                if (PEDAGOGY.MILESTONES[answered]) {
+                    const milestone = PEDAGOGY.MILESTONES[answered];
+                    this.els.motivationBanner.textContent = `${milestone.emoji} ${milestone.message}`;
+                    speak(milestone.audio || milestone.message);
+                }
+                
+                this.updateStats();
+            };
+            
+            this.els.extra.appendChild(textarea);
+            const controls = document.createElement('div');
+            controls.className = 'controls';
+            controls.appendChild(finishBtn);
+            this.els.extra.appendChild(controls);
+            
+            textarea.focus();
+        },
+        
+        renderTracing() {
+            const allItems = [...CONTENT.tracing.letters, ...CONTENT.tracing.numbers];
+            const item = Utils.pick(allItems);
+            
+            this.els.gameMeta.textContent = '✏️ Nachspuren';
+            this.els.prompt.textContent = `Spure das Zeichen nach: ${item}`;
+            speak(`Spure nach: ${item}`);
+            speakLetter(item);
+            
+            const canvasContainer = document.createElement('div');
+            canvasContainer.className = 'canvas-container';
+            
+            const canvas = document.createElement('canvas');
+            const size = Math.min(window.innerWidth - 100, 400);
+            canvas.width = size;
+            canvas.height = size;
+            canvas.style.touchAction = 'none';
+            
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.strokeStyle = '#ddd';
+            ctx.lineWidth = 3;
+            ctx.font = `${size * 0.8}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.strokeText(item, canvas.width / 2, canvas.height / 2);
+            
+            canvasContainer.appendChild(canvas);
+            this.els.extra.appendChild(canvasContainer);
+            
+            let isDrawing = false;
+            let lastX = 0, lastY = 0;
+            let hasDrawn = false;
+            
+            const getPos = (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                
+                if (e.touches) {
+                    return {
+                        x: (e.touches[0].clientX - rect.left) * scaleX,
+                        y: (e.touches[0].clientY - rect.top) * scaleY
+                    };
+                }
+                return {
+                    x: (e.clientX - rect.left) * scaleX,
+                    y: (e.clientY - rect.top) * scaleY
+                };
+            };
+            
+            const startDrawing = (e) => {
+                e.preventDefault();
+                isDrawing = true;
+                const pos = getPos(e);
+                lastX = pos.x;
+                lastY = pos.y;
+                hasDrawn = true;
+            };
+            
+            const draw = (e) => {
+                if (!isDrawing) return;
+                e.preventDefault();
+                
+                const pos = getPos(e);
+                ctx.beginPath();
+                ctx.moveTo(lastX, lastY);
+                ctx.lineTo(pos.x, pos.y);
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 8;
+                ctx.lineCap = 'round';
+                ctx.stroke();
+                
+                lastX = pos.x;
+                lastY = pos.y;
+            };
+            
+            const stopDrawing = () => {
+                isDrawing = false;
+            };
+            
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', draw);
+            canvas.addEventListener('mouseup', stopDrawing);
+            canvas.addEventListener('mouseleave', stopDrawing);
+            
+            canvas.addEventListener('touchstart', startDrawing);
+            canvas.addEventListener('touchmove', draw);
+            canvas.addEventListener('touchend', stopDrawing);
+            
+            const clearBtn = document.createElement('button');
+            clearBtn.className = 'btn btn-secondary';
+            clearBtn.textContent = '🗑️ Löschen';
+            
+            const finishBtn = document.createElement('button');
+            finishBtn.className = 'btn';
+            finishBtn.textContent = '✓ Fertig';
+            
+            const controls = document.createElement('div');
+            controls.className = 'controls';
+            controls.appendChild(clearBtn);
+            controls.appendChild(finishBtn);
+            this.els.extra.appendChild(controls);
+            
+            clearBtn.onclick = () => {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.strokeStyle = '#ddd';
+                ctx.lineWidth = 3;
+                ctx.strokeText(item, canvas.width / 2, canvas.height / 2);
+                hasDrawn = false;
+            };
+            
+            finishBtn.onclick = () => {
+                if (!hasDrawn) {
+                    speak('Du musst erst nachspuren!');
+                    return;
+                }
+                
+                const feedback = Utils.pick(PEDAGOGY.FEEDBACK.correct);
+                this.els.motivationBanner.textContent = `${feedback.emoji} ${feedback.message}`;
+                speak(feedback.message);
+                Utils.playSound('correct');
+                GameState.answer(true);
+                
+                setTimeout(() => {
+                    this.els.nextBtn.style.display = 'inline-block';
+                    this.els.nextBtn.focus();
+                }, 1000);
+                
+                const answered = GameState.correct + GameState.wrong;
+                if (PEDAGOGY.MILESTONES[answered]) {
+                    const milestone = PEDAGOGY.MILESTONES[answered];
+                    this.els.motivationBanner.textContent = `${milestone.emoji} ${milestone.message}`;
+                    speak(milestone.audio || milestone.message);
+                }
+                
+                this.updateStats();
+            };
+        },
+        
+        renderPainting() {
+            const item = Utils.pick(CONTENT.painting);
+            
+            this.els.gameMeta.textContent = '🎨 Malen';
+            this.els.prompt.textContent = item.prompt;
+            speak(item.prompt);
+            
+            const canvasContainer = document.createElement('div');
+            canvasContainer.className = 'canvas-container';
+            
+            const canvas = document.createElement('canvas');
+            const maxWidth = Math.min(window.innerWidth - 60, 600);
+            const height = maxWidth * 0.75;
+            canvas.width = maxWidth;
+            canvas.height = height;
+            canvas.style.touchAction = 'none';
+            
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            canvasContainer.appendChild(canvas);
+            this.els.extra.appendChild(canvasContainer);
+            
+            const colors = ['#000000', '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF', '#FFA500', '#8B4513', '#FFB6C1'];
+            let currentColor = '#000000';
+            let currentTool = 'crayon';
+            
+            const colorPicker = document.createElement('div');
+            colorPicker.className = 'color-picker';
+            colors.forEach((color, idx) => {
+                const btn = document.createElement('button');
+                btn.className = idx === 0 ? 'color-btn active' : 'color-btn';
+                btn.style.backgroundColor = color;
+                btn.onclick = () => {
+                    currentColor = color;
+                    Array.from(colorPicker.children).forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                };
+                colorPicker.appendChild(btn);
+            });
+            this.els.extra.appendChild(colorPicker);
+            
+            const toolSelector = document.createElement('div');
+            toolSelector.style.cssText = 'display: flex; gap: 8px; justify-content: center; margin: 16px 0; flex-wrap: wrap;';
+            
+            const crayonBtn = document.createElement('button');
+            crayonBtn.className = 'btn';
+            crayonBtn.textContent = '🖍️ Wachsmaler';
+            crayonBtn.onclick = () => {
+                currentTool = 'crayon';
+                crayonBtn.style.opacity = '1';
+                inkBtn.style.opacity = '0.6';
+            };
+            
+            const inkBtn = document.createElement('button');
+            inkBtn.className = 'btn';
+            inkBtn.textContent = '🖌️ Tusche';
+            inkBtn.style.opacity = '0.6';
+            inkBtn.onclick = () => {
+                currentTool = 'ink';
+                inkBtn.style.opacity = '1';
+                crayonBtn.style.opacity = '0.6';
+            };
+            
+            toolSelector.appendChild(crayonBtn);
+            toolSelector.appendChild(inkBtn);
+            this.els.extra.appendChild(toolSelector);
+            
+            let isDrawing = false;
+            let lastX = 0, lastY = 0;
+            let hasDrawn = false;
+            
+            const getPos = (e) => {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                
+                if (e.touches) {
+                    return {
+                        x: (e.touches[0].clientX - rect.left) * scaleX,
+                        y: (e.touches[0].clientY - rect.top) * scaleY
+                    };
+                }
+                return {
+                    x: (e.clientX - rect.left) * scaleX,
+                    y: (e.clientY - rect.top) * scaleY
+                };
+            };
+            
+            const startDrawing = (e) => {
+                e.preventDefault();
+                isDrawing = true;
+                const pos = getPos(e);
+                lastX = pos.x;
+                lastY = pos.y;
+                hasDrawn = true;
+            };
+            
+            const draw = (e) => {
+                if (!isDrawing) return;
+                e.preventDefault();
+                
+                const pos = getPos(e);
+                const x = pos.x;
+                const y = pos.y;
+                
+                if (currentTool === 'crayon') {
+                    ctx.lineWidth = 5;
+                    ctx.globalAlpha = 0.6;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(lastX, lastY);
+                    ctx.lineTo(x, y);
+                    ctx.strokeStyle = currentColor;
+                    ctx.lineCap = 'round';
+                    ctx.stroke();
+                    
+                    for (let i = 0; i < 3; i++) {
+                        const offsetX = (Math.random() - 0.5) * 4;
+                        const offsetY = (Math.random() - 0.5) * 4;
+                        ctx.beginPath();
+                        ctx.moveTo(lastX + offsetX, lastY + offsetY);
+                        ctx.lineTo(x + offsetX, y + offsetY);
+                        ctx.stroke();
+                    }
+                } else {
+                    ctx.lineWidth = 15;
+                    ctx.globalAlpha = 0.3;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(lastX, lastY);
+                    ctx.lineTo(x, y);
+                    ctx.strokeStyle = currentColor;
+                    ctx.stroke();
+                    
+                    ctx.globalAlpha = 0.1;
+                    ctx.lineWidth = 20;
+                    ctx.beginPath();
+                    ctx.moveTo(lastX, lastY);
+                    ctx.lineTo(x, y);
+                    ctx.stroke();
+                }
+                
+                ctx.globalAlpha = 1.0;
+                lastX = x;
+                lastY = y;
+            };
+            
+            const stopDrawing = () => {
+                isDrawing = false;
+            };
+            
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', draw);
+            canvas.addEventListener('mouseup', stopDrawing);
+            canvas.addEventListener('mouseleave', stopDrawing);
+            
+            canvas.addEventListener('touchstart', startDrawing);
+            canvas.addEventListener('touchmove', draw);
+            canvas.addEventListener('touchend', stopDrawing);
+            
+            const clearBtn = document.createElement('button');
+            clearBtn.className = 'btn btn-secondary';
+            clearBtn.textContent = '🗑️ Löschen';
+            
+            const finishBtn = document.createElement('button');
+            finishBtn.className = 'btn';
+            finishBtn.textContent = '✓ Fertig';
+            
+            const controls = document.createElement('div');
+            controls.className = 'controls';
+            controls.appendChild(clearBtn);
+            controls.appendChild(finishBtn);
+            this.els.extra.appendChild(controls);
+            
+            clearBtn.onclick = () => {
+                ctx.fillStyle = '#FFFFFF';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                hasDrawn = false;
+            };
+            
+            finishBtn.onclick = () => {
+                if (!hasDrawn) {
+                    speak('Du musst erst etwas malen!');
+                    return;
+                }
+                
+                const feedback = Utils.pick(PEDAGOGY.FEEDBACK.correct);
+                this.els.motivationBanner.textContent = `${feedback.emoji} ${feedback.message}`;
+                speak(feedback.message);
+                Utils.playSound('correct');
+                GameState.answer(true);
+                
+                setTimeout(() => {
+                    this.els.nextBtn.style.display = 'inline-block';
+                    this.els.nextBtn.focus();
+                }, 1000);
+                
+                const answered = GameState.correct + GameState.wrong;
+                if (PEDAGOGY.MILESTONES[answered]) {
+                    const milestone = PEDAGOGY.MILESTONES[answered];
+                    this.els.motivationBanner.textContent = `${milestone.emoji} ${milestone.message}`;
+                    speak(milestone.audio || milestone.message);
+                }
+                
+                this.updateStats();
+            };
+        },
+
+        renderFinished() {
+            const stats = GameState.getStats();
+            let emoji = '🎉';
+            let message = '';
+            let reflection = '';
+            
+            if (stats.percent === 100) {
+                emoji = '🌟✨🏆';
+                message = 'WOW! Alle richtig! Du bist ein Superstar!';
+                reflection = 'Du hast ganz toll aufgepasst und nie aufgegeben!';
+            } else if (stats.percent >= 90) {
+                emoji = '⭐🎉';
+                message = 'Fantastisch! Fast alles richtig!';
+                reflection = 'Du warst super konzentriert! Das war richtig toll!';
+            } else if (stats.percent >= 75) {
+                emoji = '👏🎊';
+                message = 'Sehr gut! Das hast du super gemacht!';
+                reflection = 'Du hast fleißig geübt! Weiter so!';
+            } else if (stats.percent >= 60) {
+                emoji = '👍🌟';
+                message = 'Gut gemacht! Du lernst mit jeder Aufgabe mehr!';
+                reflection = 'Manche Aufgaben waren schwierig, aber du hast nicht aufgegeben!';
+            } else if (stats.percent >= 40) {
+                emoji = '🌈🌟';
+                message = 'Prima! Du bist drangeblieben!';
+                reflection = 'Das war heute schwierig. Beim nächsten Mal wird es leichter!';
+            } else {
+                emoji = '🌱✨';
+                message = 'Super! Du hast nicht aufgegeben!';
+                reflection = 'Das war heute richtig schwierig. Aber Fehler helfen uns beim Lernen!';
+            }
+            
+            let streakText = '';
+            if (stats.maxStreak >= 5) {
+                streakText = `<br>🔥 Wow! Du hattest ${stats.maxStreak} richtige Antworten hintereinander! Das war toll!`;
+            }
+            
+            let processText = '';
+            if (stats.percent < 60) {
+                processText = '<br>💪 Wichtig ist: Du hast durchgehalten! Das ist super!';
+            }
+            
+            this.els.prompt.innerHTML = `<div class="celebration">${emoji}</div>`;
+            this.els.gameMeta.textContent = '🎊 Geschafft!';
+            this.els.choices.innerHTML = '';
+            this.els.extra.innerHTML = `
+                <div style="text-align: center; font-size: clamp(1.2rem, 4vw, 1.5rem); font-weight: 900; margin: 20px 0; color: var(--primary);">
+                    ${message}
+                </div>
+                <div style="text-align: center; font-size: clamp(1rem, 3vw, 1.2rem); line-height: 1.6; color: var(--text); font-weight: 700;">
+                    ${reflection}
+                </div>
+                <div style="text-align: center; font-size: clamp(1rem, 3vw, 1.1rem); margin-top: 16px; font-weight: 700;">
+                    Du hast <strong style="color: var(--success-bright); font-size: clamp(1.3rem, 4vw, 1.6rem);">${stats.correct}</strong> von 
+                    <strong style="font-size: clamp(1.3rem, 4vw, 1.6rem);">${stats.total}</strong> Aufgaben richtig gelöst! 🎯
+                    ${streakText}
+                    ${processText}
+                </div>
+                <div style="text-align: center; margin-top: 20px; font-size: clamp(0.95rem, 2.5vw, 1.1rem); color: var(--text-light); font-weight: 700;">
+                    💭 Was hat dir heute am meisten Spaß gemacht?
+                </div>
+            `;
+            this.els.progressLabel.textContent = `🎯 ${stats.percent}% Erfolg!`;
+            this.els.progressBar.style.width = '100%';
+            
+            this.els.speakBtn.disabled = true;
+            this.hideCard(this.els.streakContainer);
+            
+            let audioMessage;
+            if (stats.percent === 100) {
+                audioMessage = 'Ausgezeichnet!';
+            } else if (stats.percent >= 90) {
+                audioMessage = 'Sehr gut!';
+            } else if (stats.percent >= 75) {
+                audioMessage = 'Sehr gut!';
+            } else if (stats.percent >= 60) {
+                audioMessage = 'Gut!';
+            } else if (stats.percent >= 40) {
+                audioMessage = 'Prima!';
+            } else {
+                audioMessage = 'Gut!';
+            }
+            speak(audioMessage);
+            
+            if (GameState.timerInterval) {
+                clearInterval(GameState.timerInterval);
+                GameState.timerInterval = null;
+            }
+        },
+
+        updateStats() {
+            const stats = GameState.getStats();
+            this.els.statCorrect.textContent = stats.correct;
+            this.els.statWrong.textContent = stats.wrong;
+            this.els.statPercent.textContent = `${stats.percent}%`;
+        },
+
+        updateTimer() {
+            const stats = GameState.getStats();
+            this.els.statTime.textContent = Utils.formatTime(stats.elapsed);
+        },
+
+        showCard(card) {
+            if (card) card.classList.remove('hidden');
+        },
+
+        hideCard(card) {
+            if (card) card.classList.add('hidden');
+        }
+    };
+
+    /*************** INITIALIZATION ***************/
+    document.addEventListener('DOMContentLoaded', () => {
+        UI.init();
+        
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => {});
+        }
+    });
+    </script>
+</body>
+</html>
